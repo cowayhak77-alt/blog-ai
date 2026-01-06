@@ -17,8 +17,19 @@ load_dotenv()
 sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
 
-# [주의] API 키가 코드에 포함되었습니다. (Github에 올리면 다른 사람도 볼 수 있으니 주의하세요)
-GENAI_API_KEY = "AIzaSyBwCJJp5dp8__yODAZnz_ILGNGw00mnjzI"
+# [보안 수정] API 키를 코드에서 분리했습니다.
+# Streamlit Cloud에서는 'Secrets' 메뉴에 키를 저장해야 합니다.
+try:
+    if "GEMINI_API_KEY" in st.secrets:
+        GENAI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    else:
+        GENAI_API_KEY = os.getenv("GEMINI_API_KEY")
+except FileNotFoundError:
+    GENAI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if not GENAI_API_KEY:
+    st.error("🚨 API 키가 설정되지 않았습니다. Streamlit 'Settings > Secrets' 메뉴에 키를 입력해주세요.")
+    st.stop()
 
 genai.configure(api_key=GENAI_API_KEY)
 model = genai.GenerativeModel('gemini-3-flash-preview') 
