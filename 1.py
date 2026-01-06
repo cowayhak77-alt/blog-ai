@@ -13,27 +13,12 @@ from dotenv import load_dotenv
 from datetime import datetime
 
 # 1. 환경 설정 및 인코딩 방어
-# 1. 환경 설정 및 인코딩 방어
 load_dotenv()
 sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
 
-# [Cloud/Local] API 키 로드 우선순위:
-# 1. Streamlit Cloud Secrets (st.secrets)
-# 2. 로컬 환경 변수 (.env)
-# 3. 코드 내 하드코딩 (최후의 수단 - 비추천)
-try:
-    if "GEMINI_API_KEY" in st.secrets:
-        GENAI_API_KEY = st.secrets["GEMINI_API_KEY"]
-    else:
-        GENAI_API_KEY = os.getenv("GEMINI_API_KEY")
-except FileNotFoundError:
-    GENAI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-if not GENAI_API_KEY:
-    # 사용자 편의를 위해 최후의 수단으로 키가 없으면 에러 대신 안내
-    st.error("🚨 API 키가 없습니다. Streamlit Cloud의 Secrets에 'GEMINI_API_KEY'를 설정해주세요.")
-    st.stop()
+# [주의] API 키가 코드에 포함되었습니다. (Github에 올리면 다른 사람도 볼 수 있으니 주의하세요)
+GENAI_API_KEY = "AIzaSyBwCJJp5dp8__yODAZnz_ILGNGw00mnjzI"
 
 genai.configure(api_key=GENAI_API_KEY)
 model = genai.GenerativeModel('gemini-3-flash-preview') 
