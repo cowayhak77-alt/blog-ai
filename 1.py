@@ -6,8 +6,11 @@ import json
 import re
 import sys
 import io
-import traceback
-import textwrap
+import time
+import requests
+import pandas as pd
+import zipfile
+from io import BytesIO
 from ddgs import DDGS
 from dotenv import load_dotenv
 from datetime import datetime
@@ -17,8 +20,7 @@ load_dotenv()
 sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
 
-# [보안 수정] API 키를 코드에서 분리했습니다.
-# Streamlit Cloud에서는 'Secrets' 메뉴에 키를 저장해야 합니다.
+# [보안] API 키 로드
 try:
     if "GEMINI_API_KEY" in st.secrets:
         GENAI_API_KEY = st.secrets["GEMINI_API_KEY"]
@@ -27,43 +29,41 @@ try:
 except FileNotFoundError:
     GENAI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+try:
+    if "UNSPLASH_ACCESS_KEY" in st.secrets:
+        UNSPLASH_ACCESS_KEY = st.secrets["UNSPLASH_ACCESS_KEY"]
+    else:
+        UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
+except:
+    UNSPLASH_ACCESS_KEY = None
+
 if not GENAI_API_KEY:
-    st.error("🚨 API 키가 설정되지 않았습니다. Streamlit 'Settings > Secrets' 메뉴에 키를 입력해주세요.")
-    st.stop()
+    # 썸네일 제작기 모드일 때는 API 키가 없어도 일부 기능이 동작할 수 있으므로 강제 중단하지 않음
+    pass
 
 genai.configure(api_key=GENAI_API_KEY)
-model = genai.GenerativeModel('gemini-3-flash-preview') 
+model = genai.GenerativeModel('gemini-3-flash-preview')
 
-# 2. [데이터] 스타일 엔진 (복사용 서식)
-DIVIDERS = [
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━", "────────────────────────────",
-    "◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈", "============================================"
-]
-
-def get_rich_h3(text):
-    # 네이버 에디터에서 19px 굵은 제목으로 인식되는 코드
-    return f'\n{random.choice(DIVIDERS)}\n<span style="font-size: 19px; font-weight: bold; color: #000000;">📍 {text}</span>\n'
-
-# 3. [기능] 실시간 정보 사냥
-def hunt_realtime_info(keyword):
+# ==========================================
+# [공통 유틸리티 & 스타일 엔진]
+# ==========================================
+def hunt_realtime_info(keyword, mode='general'):
     try:
         with DDGS() as ddgs:
-            results = ddgs.news(keyword, region='kr-kr', safesearch='off', timelimit='w', max_results=6)
-            if not results:
-                results = ddgs.text(keyword, region='kr-kr', max_results=6)
             context = ""
-            for r in results:
-                context += f"기사: {r.get('title', '')}\n내용: {r.get('body', '')}\n\n"
-            return context
-    except:
-        return "최신 트렌드 데이터와 실시간 분석 정보를 기반으로 집필합니다."
-
-# 4. [기능] 텍스트 정제 (사용자 화면용)
-def clean_all_tags(text):
-    # HTML 태그 및 마크다운 기호 삭제
-    text = re.sub(r'<[^>]*>', '', text)
-    text = text.replace("**", "").replace("__", "").replace("*", "")
-    return text.strip()
+            if mode == 'info':
+                try: news_res = list(ddgs.news(keyword, region='kr-kr', timelimit='m', max_results=5))
+                except: news_res = []
+                web_res = []
+                if len(news_res) < 3: web_res = list(ddgs.text(keyword, region='kr-kr', max_results=5))
+                results = news_res + web_res
+                for r in results: context += f"출처: {r.get('title','')}\n내용: {r.get('body','')}\n\n"
+            else:
+                results = ddgs.news(keyword, region='kr-kr', safesearch='off', timelimit='w', max_results=6)
+                if not results: results = ddgs.text(keyword, region='kr-kr', max_results=6)
+                for r in results: context += f"기사: {r.get('title', '')}\n내용: {r.get('body', '')}\n\n"
+            return context if context else "검색 정보 없음. 지식 기반 작성."
+    except: return "검색 오류. 지식 기반 작성."
 
 def get_ftc_text(url):
     if not url: return ""
@@ -73,119 +73,382 @@ def get_ftc_text(url):
     if "oliveyoung" in u: return "이 포스팅은 올리브영 쇼핑 큐레이터 활동의 일환으로, 판매 발생시 수수료를 제공받습니다."
     return "이 포스팅은 제휴 마케팅 활동의 일환으로 커미션를 받습니다."
 
-# 5. 메인 UI
-st.set_page_config(page_title="GHOST v8.8 Weaver", layout="wide")
-st.title("💀 GHOST SYSTEM v8.8: THE GREAT WEAVER")
-st.markdown("<p style='color:#666;'>매번 다른 서사 구조와 자극적인 제목으로 AI임을 완벽히 숨깁니다.</p>", unsafe_allow_html=True)
+def get_naver_sales_h3(text):
+    divs = ["━━━━━━━━━━━━━━━━━━━━━━━━━━━━", "────────────────────────────", "◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈◈"]
+    return f'\n{random.choice(divs)}\n<span style="font-size: 19px; font-weight: bold; color: #000000;">📍 {text}</span>\n'
 
-if 'rich_content' not in st.session_state: st.session_state.rich_content = ""
-if 'display_content' not in st.session_state: st.session_state.display_content = ""
+def get_naver_info_h3(text):
+    color = random.choice(["#1e3a8a", "#065f46", "#b91c1c", "#111827"])
+    style = random.choice([f'border-left: 10px solid {color}; padding-left: 15px; border-bottom: 1px solid #eee; margin: 40px 0 20px 0;', f'border-top: 4px solid {color}; padding: 15px; border-bottom: 1px solid #eee; margin: 40px 0 20px 0;', f'display: inline-block; padding: 5px 15px; border: 2px solid {color}; color: {color}; border-radius: 20px; margin: 40px 0 20px 0; font-weight: bold;'])
+    font_color = "#111" if "border-bottom" in style else color
+    return f"<h3 style='font-size:22px; font-weight:bold; color:{font_color}; {style}'>{text}</h3>"
 
-col1, col2 = st.columns(2)
-with col1:
-    target_keyword = st.text_input("💎 키워드", placeholder="예: 무선 청소기 추천")
-    target_product = st.text_input("📦 상품명", placeholder="예: 다이슨 V15")
-with col2:
-    affiliate_url = st.text_input("🔗 제휴 링크", placeholder="http://...")
+def get_tistory_premium_style():
+    color = "#{:06x}".format(random.randint(0, 0x777777))
+    return random.choice([f'border-left: 15px solid {color}; border-bottom: 2px solid {color}; padding: 10px 15px; background: #f8f9fa; font-weight: bold;', f'background: linear-gradient(to right, {color}, white); color: white; padding: 12px 20px; border-radius: 5px; box-shadow: 3px 3px 5px rgba(0,0,0,0.1);', f'border: 2px solid {color}; padding: 15px; border-left: 10px solid {color}; border-radius: 0 10px 10px 0; background: #ffffff;', f'border-top: 1px solid #ddd; border-bottom: 3px double {color}; padding: 10px 0; font-size: 1.5em;'])
 
-if st.button("🚀 무한 변칙 원고 생성"):
-    if not target_keyword or not target_product or not affiliate_url:
-        st.warning("⚠️ 모든 정보를 입력해주세요.")
+def get_tistory_sales_h3(text):
+    color = "#{:06x}".format(random.randint(0, 0x777777))
+    style = random.choice([f'border-left: 10px solid {color}; border-bottom: 2px solid {color}; padding: 5px 15px; margin: 40px 0 15px 0; font-weight: bold; font-size: 1.3em; display: block;', f'background-color: {color}; color: white; padding: 10px 18px; margin: 40px 0 15px 0; font-weight: bold; border-radius: 5px; display: block;', f'border-bottom: 5px double {color}; padding-bottom: 8px; margin: 40px 0 15px 0; font-weight: bold; font-size: 1.4em; display: block;'])
+    return f'<br><h3 style="{style}">{text}</h3>'
+
+def get_info_images(queries, count=5):
+    headers = {"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"} if UNSPLASH_ACCESS_KEY else {}
+    img_urls = []
+    for q in queries[:count]:
+        try:
+            if UNSPLASH_ACCESS_KEY:
+                res = requests.get(f"https://api.unsplash.com/search/photos?query={q}&per_page=1", headers=headers, timeout=5)
+                if res.status_code == 200 and res.json()['results']:
+                    img_urls.append(res.json()['results'][0]['urls']['regular'])
+                    continue
+            img_urls.append(f"https://loremflickr.com/800/600/business,{q}")
+        except: img_urls.append("https://picsum.photos/800/600")
+    return img_urls
+
+# --- [새 기능: 키워드 수집기용 스크래퍼] ---
+def get_naver_best_keywords(category_id='50000006'):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    url = f"https://snxbest.naver.com/product/best/click?categoryCategoryId={category_id}"
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            # 제품명 추출 (정규식 활용 - 1.py의 경량성 유지)
+            titles = re.findall(r'"productName":"(.*?)"', res.text)
+            links = re.findall(r'"originUrl":"(.*?)"', res.text)
+            results = []
+            for t, l in zip(titles[:20], links[:20]):
+                results.append({"keyword": t, "product": t, "link": l.replace("\\u0026", "&")})
+            return results
+    except: pass
+    return []
+
+def get_coupang_best_keywords(keyword):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+    }
+    url = f"https://www.coupang.com/np/search?q={keyword}"
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            # 쿠팡은 보안이 강해 정식 API 사용 권장이나, 여기서는 간단한 텍스트 파싱 시도
+            # 실제 개발 환경에서는 Selenium/Playwright가 필요할 수 있음
+            # 키워드 기반이라 DDGS로 대체 검색하여 상위 결과를 가져오는 것이 더 안정적일 수 있음
+            with DDGS() as ddgs:
+                results = list(ddgs.text(f"{keyword} 추천", max_results=10))
+                return [{"keyword": r['title'], "product": r['title'], "link": r['href']} for r in results]
+    except: pass
+    return []
+
+def create_tistory_sales_cta(product_name, product_url):
+    phrase = random.choice(["⚠️ 재고 비상! 품절 임박", "⏳ 오늘만 이 가격!", "🚨 긴급 물량 확보!", "⚡ 품절 대란템!", "💰 최저가 보장"])
+    btn = random.choice(["👉 최저가 확인하기", "👉 혜택 적용가 보기", "👉 품절 전 선점하기"])
+    return f"""
+    <style>
+    .blink-border {{ background: #fbf0f6; border: 3px solid red; border-radius: 11px; padding: 18px 16px; margin: 25px 0; animation: blink 1s infinite; }}
+    @keyframes blink {{ 50% {{ border-color: transparent; }} }}
+    .animate-text {{ animation: pulse 1s infinite alternate; font-weight: 900; font-size: 1.2em; color:#e60000; }}
+    @keyframes pulse {{ to {{ transform: scale(1.05); }} }}
+    </style>
+    <div class="blink-border"><span class="animate-text">{phrase}</span><br><div style="margin-top: 10px;"><a href="{product_url}" target="_blank" style="color:#1a3d7c; font-weight:bold; font-size:1.1em;">👉 {btn} ({product_name})</a></div></div>
+    """
+
+# ==========================================
+# [썸네일 제작기 데이터]
+# ==========================================
+THUMBNAIL_HTML = """
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <link href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&family=Do+Hyeon&family=Dokdo&family=Dongle&family=Gaegu&family=Gamja+Flower&family=Gowun+Batang&family=Gowun+Dodum&family=Gugi&family=Hi+Melody&family=Jua&family=Kirang+Haerang&family=Nanum+Brush+Script&family=Nanum+Gothic&family=Nanum+Myeongjo&family=Nanum+Pen+Script&family=Noto+Sans+KR:wght@900&family=Noto+Serif+KR:wght@900&family=Poor+Story&family=Single+Day&family=Song+Myung&family=Sunflower:wght@700&family=Stylish&family=Yeon+Sung&display=swap" rel="stylesheet">
+  <style>
+    :root { --bg: #0f172a; --panel: #1e293b; --accent: #38bdf8; }
+    body { background: #000; color: #fff; font-family: 'Noto Sans KR', sans-serif; margin: 0; padding: 10px; display: flex; flex-direction: column; align-items: center; overflow-x: hidden; }
+    .controls { width: 100%; max-width: 600px; background: var(--panel); padding: 15px; border-radius: 12px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 10px; }
+    input, textarea, button { width: 100%; padding: 10px; border-radius: 6px; border: none; font-size: 14px; }
+    textarea { height: 60px; }
+    button { cursor: pointer; font-weight: bold; background: var(--accent); color: #000; }
+    .row { display: flex; gap: 5px; }
+    canvas { max-width: 100%; border: 1px solid #444; border-radius: 8px; }
+    label { font-size: 12px; color: #94a3b8; }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <div class="row"><input id="kw" type="text" placeholder="키워드" value="아이폰15"><button onclick="genH()" style="width:80px">AI문구</button></div>
+    <textarea id="txt" oninput="draw()">지금 아이폰15 안 사면\n100% 후회하는 이유</textarea>
+    <div class="row">
+        <button onclick="rndF()">🎲 폰트</button>
+        <button onclick="rndB()">🎲 배경</button>
+        <button onclick="down()">📥 저장</button>
+    </div>
+    <div class="row"><label>크기</label><input type="range" id="sz" min="50" max="250" value="100" oninput="draw()"></div>
+  </div>
+  <canvas id="cv" width="1080" height="1080"></canvas>
+  <script>
+    const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+    const fonts = ["Black Han Sans", "Do Hyeon", "Jua", "Gugi", "Sunflower", "Noto Sans KR", "Noto Serif KR", "Nanum Pen Script", "Stylish"];
+    let fIdx = 0, bg = null;
+    const hooks = ["지금 {kw} 모르면\n손해보는 3가지", "{kw} 끝판왕!\n가성비 미쳤습니다", "솔직히 말합니다.\n{kw} 진짜 별로일까?"];
+    function draw() {
+      if(bg) ctx.drawImage(bg,0,0,1080,1080); else {ctx.fillStyle="#1e293b"; ctx.fillRect(0,0,1080,1080);}
+      ctx.fillStyle = "rgba(0,0,0,0.4)"; ctx.fillRect(0,0,1080,1080);
+      const lines = document.getElementById('txt').value.split('\\n'), sz = document.getElementById('sz').value;
+      ctx.font = `${sz}px "${fonts[fIdx]}"`; ctx.textAlign="center"; ctx.textBaseline="middle"; ctx.strokeStyle="#000"; ctx.lineWidth=sz*0.15; ctx.lineJoin="round";
+      let y = 1080/2 - ((lines.length-1)*sz*1.2)/2;
+      lines.forEach(l => { ctx.strokeText(l,540,y); ctx.fillStyle="#fff"; ctx.fillText(l,540,y); y+=sz*1.2; });
+      ctx.strokeStyle="white"; ctx.lineWidth=10; ctx.strokeRect(40,40,1000,1000);
+    }
+    function genH() { document.getElementById('txt').value = hooks[Math.floor(Math.random()*hooks.length)].replace("{kw}", document.getElementById('kw').value); draw(); }
+    function rndF() { fIdx=(fIdx+1)%fonts.length; draw(); }
+    function rndB() { const i=new Image(); i.crossOrigin="Anonymous"; i.src=`https://picsum.photos/1080/1080?random=${Math.random()}`; i.onload=()=>{bg=i; draw();}; }
+    function down() { const a=document.createElement('a'); a.download='thumb.png'; a.href=cv.toDataURL(); a.click(); }
+    rndB();
+  </script>
+</body>
+</html>
+"""
+
+# ==========================================
+# [메인 로직]
+# ==========================================
+st.set_page_config(page_title="GHOST Hub v9.0", layout="wide")
+
+with st.sidebar:
+    st.title("🧙‍♂️ GHOST HUB")
+    mode = st.radio("모드 선택", 
+        ["🟢 네이버 [수익형]", "🟢 네이버 [정보성]", "🟠 티스토리 [정보성]", "🟠 티스토리 [수익형]", "🖼️ 썸네일 제작기", "🔍 키워드 수집기", "🚀 엑셀 일괄 생성기"]
+    )
+    st.markdown("---")
+    if GENAI_API_KEY: st.success("✅ API Connected")
+    else: st.error("🚨 API Key Missing")
+
+st.title(f"🚀 {mode}")
+
+if mode == "🚀 엑셀 일괄 생성기":
+    st.markdown("### 📊 엑셀 파일을 업로드하여 여러 개의 원고를 한 번에 생성합니다.")
+    st.info("엑셀 파일 양식: A열(모드), B열(키워드), C열(상품명), D열(링크)\n* 모드 예시: 네이버수익, 네이버정보, 티스토리정보, 티스토리수익")
+    
+    uploaded_file = st.file_uploader("엑셀 파일 업로드 (.xlsx)", type=["xlsx"])
+    
+    if uploaded_file:
+        df = pd.read_excel(uploaded_file)
+        st.write("업로드된 데이터 미리보기:")
+        st.dataframe(df.head())
+        
+        if st.button("🚀 일괄 생성 시작"):
+            results = []
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            for i, row in df.iterrows():
+                try:
+                    m = str(row[0]).strip()
+                    kw = str(row[1]).strip()
+                    prod = str(row[2]).strip() if len(row) > 2 else ""
+                    link = str(row[3]).strip() if len(row) > 3 else ""
+                    
+                    status_text.text(f"처리 중 ({i+1}/{len(df)}): {kw}")
+                    
+                    # 생성 로직 (기존 함수 재활용)
+                    content = ""
+                    title = kw
+                    
+                    if "네이버수익" in m:
+                        facts = hunt_realtime_info(kw, 'sales')
+                        raw = model.generate_content(f"네이버 수익형 2500자: {kw}, {prod}, {link}, {facts}").text
+                        content = re.sub(r'\[TITLE\](.*?)\[/TITLE\]', lambda match: get_naver_sales_h3(match.group(1)), raw)
+                        cta = f'<span style="color: #00C73C; font-weight: bold;">👉 {prod} 최저가: {link}</span>'
+                        content = re.sub(r'\[\[CTA_\d\]\]', cta, content)
+                        content = get_ftc_text(link) + "\n\n" + content
+                    elif "네이버정보" in m:
+                        facts = hunt_realtime_info(kw, 'info')
+                        raw = model.generate_content(f"네이버 정보성 JSON: {kw}, {facts}").text
+                        data = json.loads(re.search(r'\{.*\}', raw, re.DOTALL).group())
+                        title = data['title']
+                        content = re.sub(r'\[\[H3\]\](.*?)\[\[/H3\]\]', lambda match: get_naver_info_h3(match.group(1)), data['content'])
+                        imgs = get_info_images(data.get('img_queries', []), 3)
+                        for idx, u in enumerate(imgs): content = content.replace(f"[IMG_{idx+1}]", f"<img src='{u}' style='width:100%'>")
+                    elif "티스토리정보" in m:
+                        facts = hunt_realtime_info(kw, 'info')
+                        raw = model.generate_content(f"티스토리 정보성 JSON: {kw}, {facts}").text
+                        data = json.loads(re.search(r'\{.*\}', raw, re.DOTALL).group())
+                        title = data['title']
+                        content = data['content']
+                        h3s = re.findall(r'<h3>(.*?)</h3>', content)
+                        for h in h3s: content = content.replace(f'<h3>{h}</h3>', f'<br><h3 style="{get_tistory_premium_style()}">{h}</h3>', 1)
+                    elif "티스토리수익" in m:
+                        facts = hunt_realtime_info(kw, 'sales')
+                        raw = model.generate_content(f"티스토리 수익형 JSON: {kw}, {prod}, {link}, {facts}").text
+                        data = json.loads(re.search(r'\{.*\}', raw, re.DOTALL).group())
+                        title = data['title']
+                        content = data['content']
+                        h3s = re.findall(r'<h3>(.*?)</h3>', content)
+                        for h in h3s: content = content.replace(f'<h3>{h}</h3>', get_tistory_sales_h3(h), 1)
+                        cta = create_tistory_sales_cta(prod, link)
+                        content = content.replace("[CTA_1]", cta).replace("[CTA_2]", cta)
+                    
+                    results.append({"filename": f"{i+1}_{title[:20]}.html", "content": content})
+                    
+                except Exception as e:
+                    results.append({"filename": f"{i+1}_에러.txt", "content": f"오류 발생: {str(e)}"})
+                
+                progress_bar.progress((i + 1) / len(df))
+            
+            status_text.text("✅ 생성 완료! 압축 파일을 다운로드하세요.")
+            
+            # ZIP 파일 생성
+            zip_buffer = BytesIO()
+            with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+                for res in results:
+                    zip_file.writestr(res["filename"], res["content"])
+            
+            st.download_button(
+                label="📥 생성된 원고 전체 다운로드 (ZIP)",
+                data=zip_buffer.getvalue(),
+                file_name=f"ghost_bulk_{datetime.now().strftime('%m%d_%H%M')}.zip",
+                mime="application/zip"
+            )
+
+elif mode == "🖼️ 썸네일 제작기":
+    st.markdown("<p style='color:#666;'>글쓰기 완료 후, 이미지로 저장하여 블로그 썸네일로 사용하세요.</p>", unsafe_allow_html=True)
+    st.components.v1.html(THUMBNAIL_HTML, height=1200, scrolling=True)
+
+elif mode == "🔍 키워드 수집기":
+    st.markdown("### 🔍 키워드 수집 및 관리")
+    st.info("자동으로 인기 상품을 가져오거나, 직접 키워드를 입력하여 엑셀 템플릿을 만듭니다.")
+    
+    if 'collector_data' not in st.session_state:
+        st.session_state.collector_data = pd.DataFrame(columns=["모드", "키워드", "상품명", "링크"])
+
+    type_menu = st.radio("수집 방식", ["자동 수집", "직접 입력"], horizontal=True)
+    
+    if type_menu == "자동 수집":
+        col1, col2 = st.columns(2)
+        with col1:
+            source = st.selectbox("수집 소스", ["네이버 쇼핑 베스트", "쿠팡 검색"])
+            target_mode = st.selectbox("적용할 블로그 모드", ["네이버수익", "티스토리수익"])
+        
+        with col2:
+            if source == "네이버 쇼핑 베스트":
+                cat_map = {"식품":"50000006", "패션의류":"50000000", "화장품/미용":"50000002", "디지털/가전":"50000003", "생활/건강":"50000008"}
+                category = st.selectbox("카테고리 선택", list(cat_map.keys()))
+                cat_id = cat_map[category]
+            else:
+                search_kw = st.text_input("검색 키워드", "캠핑용품")
+                
+        if st.button("🚀 자동 수집 시작"):
+            with st.spinner("수집 중..."):
+                if source == "네이버 쇼핑 베스트":
+                    data = get_naver_best_keywords(cat_id)
+                else:
+                    data = get_coupang_best_keywords(search_kw)
+                    
+                if data:
+                    new_df = pd.DataFrame(data)
+                    new_df.insert(0, "모드", target_mode)
+                    new_df.columns = ["모드", "키워드", "상품명", "링크"]
+                    st.session_state.collector_data = pd.concat([st.session_state.collector_data, new_df]).drop_duplicates().reset_index(drop=True)
+                    st.success(f"✅ {len(new_df)}개의 아이템을 추가했습니다.")
+                else:
+                    st.error("데이터를 가져오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+
     else:
-        with st.spinner('실시간 정보를 수집하고 독창적인 서사를 엮는 중...'):
+        st.write(" 아래 표에 직접 내용을 입력하거나 수정하세요. (행 추가 가능)")
+        if st.button("🧹 전체 초기화"):
+            st.session_state.collector_data = pd.DataFrame(columns=["모드", "키워드", "상품명", "링크"])
+            st.rerun()
+
+    # 데이터 편집기 (자동/수동 공용)
+    edited_df = st.data_editor(
+        st.session_state.collector_data, 
+        num_rows="dynamic", 
+        use_container_width=True,
+        column_config={
+            "모드": st.column_config.SelectboxColumn("모드", options=["네이버수익", "네이버정보", "티스토리정보", "티스토리수익"], required=True),
+            "링크": st.column_config.LinkColumn("링크")
+        }
+    )
+    st.session_state.collector_data = edited_df
+
+    if not edited_df.empty:
+        # 엑셀 다운로드
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            edited_df.to_excel(writer, index=False, sheet_name='Sheet1')
+        
+        st.download_button(
+            label="📥 최종 리스트 엑셀로 저장 (일괄 생성용)",
+            data=output.getvalue(),
+            file_name=f"keywords_{datetime.now().strftime('%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+elif mode == "🟢 네이버 [수익형]":
+    c1, c2 = st.columns(2)
+    with c1:
+        keyword, product = st.text_input("💎 키워드"), st.text_input("📦 상품명")
+    with c2: link = st.text_input("🔗 제휴 링크")
+    
+    if st.button("원고 생성"):
+        with st.spinner('작성 중...'):
+            facts = hunt_realtime_info(keyword, 'sales')
+            prompt = f"네이버 수익형 작성: {keyword}, {product}, {link}, {facts}. 2500자 이상, <b>강조, [TITLE]소제목[/TITLE], [[CTA_1]], [[CTA_2]]."
             try:
-                real_facts = hunt_realtime_info(target_keyword)
-                
-                # 검색 제한 감지 시 처리
-                if "❌ 검색 제한" in real_facts:
-                    st.warning("⚠️ 검색량이 많아 잠시 차단되었습니다. AI의 배경지식으로 작성합니다.")
-                    real_facts = "실시간 정보를 가져올 수 없습니다. 귀하의 전문 지식을 바탕으로 가장 정확하고 유용한 정보를 작성하세요."
-                # 5가지 구조 중 랜덤 선택 (서사 방식 변경)
-                narrative_style = random.randint(1, 5) 
-                disclosure = get_ftc_text(affiliate_url)
+                res = model.generate_content(prompt).text
+                res = re.sub(r'\[TITLE\](.*?)\[/TITLE\]', lambda m: get_naver_sales_h3(m.group(1)), res)
+                cta = f'<span style="color: #00C73C; font-weight: bold;">👉 {product} 최저가: {link}</span>'
+                res = re.sub(r'\[\[CTA_\d\]\]', cta, res)
+                st.markdown(get_ftc_text(link) + "\n\n" + res, unsafe_allow_html=True)
+            except Exception as e: st.error(e)
 
-                # [단계 2] 프롬프트 설계 (예시를 제거하고 창의성을 극대화)
-                current_date = datetime.now().strftime("%Y년 %m월 %d일")
-                prompt = f"""
-                당신은 네이버 상위 0.0001% 마케팅 천재이자 심리학을 통달한 전문 작가입니다.
-                오늘 날짜는 {current_date}입니다. 이 날짜를 기준으로 과거와 미래를 명확히 구분하여 작성하세요.
-                '{target_keyword}'독자가 당신의 글을 읽으면 '이건 진짜 사람이 썼다'고 확신하게 만드는 2,500자 이상의 문서를 작성하세요.
+elif mode == "🟢 네이버 [정보성]":
+    keyword = st.text_input("💎 정보성 키워드")
+    if st.button("정보성 칼럼 생성"):
+        with st.spinner('분석 중...'):
+            facts = hunt_realtime_info(keyword, 'info')
+            prompt = f"주제: {keyword} 정보성 글 JSON: {{'title':'','content':'HTML본문 [[H3]]제목[[/H3]], [IMG_1]~[IMG_3]','img_queries':[],'hashtags':''}}"
+            try:
+                raw = model.generate_content(prompt).text
+                data = json.loads(re.search(r'\{.*\}', raw, re.DOTALL).group())
+                content = re.sub(r'\[\[H3\]\](.*?)\[\[/H3\]\]', lambda m: get_naver_info_h3(m.group(1)), data['content'])
+                imgs = get_info_images(data.get('img_queries', []), 3)
+                for i, u in enumerate(imgs): content = content.replace(f"[IMG_{i+1}]", f"<img src='{u}' style='width:100%'>")
+                st.markdown(f"<h1>{data['title']}</h1>{content}", unsafe_allow_html=True)
+            except Exception as e: st.error(e)
 
-                [입력 데이터]
-                - 작성일: {current_date}
-                - 키워드: {target_keyword}
-                - 상품명: {target_product}
-                - 링크: {affiliate_url}
-                - 실시간 이슈: {real_facts}
-                - 서사 스타일 코드: {narrative_style} (1:폭로, 2:취재, 3:경험전환, 4:비교분석, 5:미래예측)
+elif mode == "🟠 티스토리 [정보성]":
+    keyword = st.text_input("💎 티스토리 정보 키워드")
+    if st.button("티스토리 정보 생성"):
+        with st.spinner('작성 중...'):
+            facts = hunt_realtime_info(keyword, 'info')
+            try:
+                raw = model.generate_content(f"티스토리 정보성 JSON: {keyword}, {facts}").text
+                data = json.loads(re.search(r'\{.*\}', raw, re.DOTALL).group())
+                h3s = re.findall(r'<h3>(.*?)</h3>', data['content'])
+                for h in h3s: data['content'] = data['content'].replace(f'<h3>{h}</h3>', f'<br><h3 style="{get_tistory_premium_style()}">{h}</h3>', 1)
+                st.text_area("HTML 소스", data['content'], height=300)
+                st.markdown(data['content'], unsafe_allow_html=True)
+            except Exception as e: st.error(e)
 
-                [필수 작성 지침 - AI 흔적 말살]
-                1. **제목**: 구체적인 예시 없이, '공포/이득/호기심' 중 하나의 트리거를 선택해 창조하세요. 제목에 '{target_keyword}'가 반드시 포함되어야 합니다.
-                2. **입막음**: 본문에 "태그를 사용하겠습니다", "지침에 따라" 같은 메타 발언이나 인사말은 **절대** 금지입니다. 바로 원고 내용으로 시작하세요.
-                3. **마크다운 금지**: *, # 기호 금지. 강조는 오직 <b>태그만 사용하세요. (태그 설명도 하지 마세요)
-                4. **본문 강조 기술**: 수치, 제품명, 핵심 장점은 반드시 <b>태그로 감싸 시각적 만족도를 높이세요.
-                5. **무제한 랜덤 CTA**: 이 글의 맥락을 완벽히 이해하고, 독자가 지금 당장 이 제품을 사지 않으면 손해라는 창작 멘트를 [[CTA_1]], [[CTA_2]] 위치에 매번 다르게 창작하세요.
-                6. **글의 구조**: 
-                    - 도입부: 뉴스 기반 위기론/트렌드 분석
-                   - 상단: [핵심 요약 박스] - 3줄 요약 + 주요 스펙(속성) 3가지
-                   - 본문: 소제목 5개 이상. 각 섹션은 '사실-분석-주관적 견해'로 상세히 서술. 소제목은 [TITLE]텍스트[/TITLE] 형식으로 출력.
-                   - 중반: [상세 스펙 및 속성] - 수치와 단위를 포함하여 전문적으로 기술.
-                   - 하단: [액션 체크리스트] - 구매 전 필수 확인 사항 5가지.
-                   - 마무리: 심층 Q&A 3세트 및 전문가 총평.
-                7. **해시태그**: 본문 최하단에 관련 태그 7개를 생성하세요.
-                """
-
-                response = model.generate_content(prompt)
-                raw_text = response.text
-                
-                # 1. 소제목 치환 (Rich Text용)
-                def replace_h3(match): return get_rich_h3(match.group(1))
-                rich_text = re.sub(r'\[TITLE\](.*?)\[/TITLE\]', replace_h3, raw_text)
-                
-                # 2. CTA 치환
-                def cta_replacer(match):
-                    return f'\n\n<span style="color: #00C73C; font-weight: bold;">👉 {target_product} 최저가 확인 및 상세 정보: {affiliate_url}</span>\n\n'
-                rich_text = re.sub(r'\[\[CTA_\d\]\]', cta_replacer, rich_text)
-
-                # 3. 최종 조립 (복사용)
-                final_rich = f"{disclosure}\n\n{rich_text}\n\n"
-                
-                st.session_state.rich_content = final_rich
-                # 4. 화면 표시용 (모든 HTML 태그 강제 삭제 - 지침 언급 차단)
-                st.session_state.display_content = clean_all_tags(final_rich)
-
-            except Exception as e:
-                st.error(f"오류 발생: {e}")
-
-# [결과 출력 영역]
-if st.session_state.display_content:
-    st.divider()
-    st.subheader("📋 네이버 블로그 원고 (확인용)")
-    st.text_area("내용을 확인하세요. (복사는 아래 버튼 사용)", 
-                 value=st.session_state.display_content, height=600)
-    
-    # [핵심] 리치 텍스트 복사 버튼
-    # 테이블 주변 공백 제거 로직 추가
-    safe_content = st.session_state.rich_content.replace("`", "\\`").replace("$", "\\$")
-    safe_content = re.sub(r'>\s*\n\s*<', '><', safe_content)
-    safe_content = re.sub(r'\n+\s*(<table)', r'\1', safe_content)
-    rich_html_code = safe_content.replace("\n", "<br>")
-    
-    st.components.v1.html(f"""
-        <button onclick="copyRichText()" style="width:100%; padding:20px; background:#111; color:#00FF7F; border:2px solid #00FF7F; border-radius:12px; font-weight:bold; cursor:pointer; font-size:18px; box-shadow: 0 0 15px rgba(0, 255, 127, 0.4);">
-            📋 네이버 블로그 서식 포함 전체 복사하기
-        </button>
-        <script>
-        function copyRichText() {{
-            try {{
-                const html = `{rich_html_code}`;
-                const type = "text/html";
-                const blob = new Blob([html], {{ type }});
-                const data = [new ClipboardItem({{ [type]: blob }})];
-                navigator.clipboard.write(data).then(() => alert("✅ 19px 소제목과 굵은 글씨 서식이 복사되었습니다!"));
-            }} catch (err) {{
-                alert("복사 실패: 브라우저 보안 설정을 확인하세요.");
-            }}
-        }}
-        </script>
-    """, height=100)
+elif mode == "🟠 티스토리 [수익형]":
+    c1, c2, c3 = st.columns(3)
+    with c1: kw = st.text_input("💎 키워드")
+    with c2: prod = st.text_input("📦 상품명")
+    with c3: url = st.text_input("🔗 제휴 URL")
+    if st.button("티스토리 수익형 생성"):
+        with st.spinner('작성 중...'):
+            facts = hunt_realtime_info(kw, 'sales')
+            try:
+                raw = model.generate_content(f"티스토리 수익형 JSON: {kw}, {prod}, {url}, {facts}").text
+                data = json.loads(re.search(r'\{.*\}', raw, re.DOTALL).group())
+                content = data['content']
+                h3s = re.findall(r'<h3>(.*?)</h3>', content)
+                for h in h3s: content = content.replace(f'<h3>{h}</h3>', get_tistory_sales_h3(h), 1)
+                cta = create_tistory_sales_cta(prod, url)
+                content = content.replace("[CTA_1]", cta).replace("[CTA_2]", cta)
+                st.text_area("HTML 소스", content, height=300)
+                st.markdown(content, unsafe_allow_html=True)
+            except Exception as e: st.error(e)
